@@ -1,119 +1,341 @@
 import "./styles.css";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import createGlobe from "cobe";
-import usePartySocket from "partysocket/react";
 
-// The type of messages we'll be receiving from the server
-import type { OutgoingMessage } from "../shared";
-import type { LegacyRef } from "react";
+const STORAGE_KEY = "kimecube.devspace.v1";
 
-function App() {
-  // A reference to the canvas element where we'll render the globe
-  const canvasRef = useRef<HTMLCanvasElement>();
-  // The number of markers we're currently displaying
-  const [counter, setCounter] = useState(0);
-  // A map of marker IDs to their positions
-  // Note that we use a ref because the globe's `onRender` callback
-  // is called on every animation frame, and we don't want to re-render
-  // the component on every frame.
-  const positions = useRef<
-    Map<
-      string,
-      {
-        location: [number, number];
-        size: number;
-      }
-    >
-  >(new Map());
-  // Connect to the PartyServer server
-  const socket = usePartySocket({
-    room: "default",
-    party: "globe",
-    onMessage(evt) {
-      const message = JSON.parse(evt.data as string) as OutgoingMessage;
-      if (message.type === "add-marker") {
-        // Add the marker to our map
-        positions.current.set(message.position.id, {
-          location: [message.position.lat, message.position.lng],
-          size: message.position.id === socket.id ? 0.1 : 0.05,
-        });
-        // Update the counter
-        setCounter((c) => c + 1);
-      } else {
-        // Remove the marker from our map
-        positions.current.delete(message.id);
-        // Update the counter
-        setCounter((c) => c - 1);
-      }
-    },
-  });
+const initialFS: Record<string, string> = {
+  "index.html": `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevSpace App</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <h1>Привет, DevSpace!</h1>
+    <p>Измени файлы слева и жми ▶️ Run.</p>
+    <script src="app.js"></script>
+  </body>
+</html>`,
+  "style.css": `:root{--bg:#0b0e16;--fg:#e6e6e6;--muted:#8e8e93;--accent:#0a84ff}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto}
+h1{font-weight:700}
+p{color:var(--muted)}`,
+  "app.js": `console.log('DevSpace ready');
+const p=document.createElement('p');
+p.textContent='JS подключен ✅';
+document.body.appendChild(p);`,
+};
 
-  useEffect(() => {
-    // The angle of rotation of the globe
-    // We'll update this on every frame to make the globe spin
-    let phi = 0;
+function loadFS(): Record<string, string> {
+  if (typeof window === "undefined") {
+    return initialFS;
+  }
 
-    const globe = createGlobe(canvasRef.current as HTMLCanvasElement, {
-      devicePixelRatio: 2,
-      width: 400 * 2,
-      height: 400 * 2,
-      phi: 0,
-      theta: 0,
-      dark: 1,
-      diffuse: 0.8,
-      mapSamples: 16000,
-      mapBrightness: 6,
-      baseColor: [0.3, 0.3, 0.3],
-      markerColor: [0.8, 0.1, 0.1],
-      glowColor: [0.2, 0.2, 0.2],
-      markers: [],
-      opacity: 0.7,
-      onRender: (state) => {
-        // Called on every animation frame.
-        // `state` will be an empty object, return updated params.
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return initialFS;
+    }
 
-        // Get the current positions from our map
-        state.markers = [...positions.current.values()];
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return { ...initialFS, ...parsed };
+  } catch {
+    return initialFS;
+  }
+}
 
-        // Rotate the globe
-        state.phi = phi;
-        phi += 0.01;
-      },
-    });
+function saveFS(fs: Record<string, string>) {
+  if (typeof window === "undefined") {
+    return;
+  }
 
-    return () => {
-      globe.destroy();
-    };
-  }, []);
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fs));
+}
+
+type EditorProps = {
+  value: string;
+  onChange: (value: string) => void;
+};
+
+function Editor({ value, onChange }: EditorProps) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
 
   return (
-    <div className="App">
-      <h1>Where's everyone at?</h1>
-      {counter !== 0 ? (
-        <p>
-          <b>{counter}</b> {counter === 1 ? "person" : "people"} connected.
-        </p>
-      ) : (
-        <p>&nbsp;</p>
-      )}
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="editor-textarea"
+      spellCheck={false}
+    />
+  );
+}
 
-      {/* The canvas where we'll render the globe */}
-      <canvas
-        ref={canvasRef as LegacyRef<HTMLCanvasElement>}
-        style={{ width: 400, height: 400, maxWidth: "100%", aspectRatio: 1 }}
-      />
+function MobileDevSpace() {
+  const [fs, setFs] = useState<Record<string, string>>(loadFS);
+  const [openFiles, setOpenFiles] = useState<string[]>(["index.html"]);
+  const [active, setActive] = useState<string>("index.html");
+  const [iframeKey, setIframeKey] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
-      {/* Let's give some credit */}
-      <p>
-        Powered by <a href="https://cobe.vercel.app/">🌏 Cobe</a>,{" "}
-        <a href="https://www.npmjs.com/package/phenomenon">Phenomenon</a> and{" "}
-        <a href="https://npmjs.com/package/partyserver/">🎈 PartyServer</a>
-      </p>
+  useEffect(() => {
+    saveFS(fs);
+  }, [fs]);
+
+  const srcDoc = useMemo(() => {
+    const html = fs["index.html"] ?? "";
+    const css = fs["style.css"] ?? "";
+    const js = fs["app.js"] ?? "";
+
+    return html
+      .replace(
+        /<link[^>]*href=["']style.css["'][^>]*>/i,
+        () => `<style>${css}</style>`
+      )
+      .replace(
+        /<script[^>]*src=["']app.js["'][^>]*><\/script>/i,
+        () => `<script>\n${js}\n<\/script>`
+      );
+  }, [fs, iframeKey]);
+
+  const addFile = () => {
+    const base = window.prompt("Имя файла (пример: script2.js)", "script2.js");
+    if (!base) {
+      return;
+    }
+
+    if (fs[base]) {
+      window.alert("Такой файл уже существует");
+      return;
+    }
+
+    const next = { ...fs, [base]: "" };
+    setFs(next);
+    setOpenFiles((prev) => Array.from(new Set([...prev, base])));
+    setActive(base);
+  };
+
+  const deleteFile = (name: string) => {
+    if (!window.confirm(`Удалить ${name}?`)) {
+      return;
+    }
+
+    const { [name]: _removed, ...rest } = fs;
+    setFs(rest);
+    setOpenFiles((prev) => prev.filter((file) => file !== name));
+
+    if (active === name) {
+      const nextActive = Object.keys(rest)[0] ?? "index.html";
+      setActive(nextActive);
+    }
+  };
+
+  const renameFile = (oldName: string) => {
+    const newName = window.prompt("Новое имя", oldName);
+    if (!newName || newName === oldName) {
+      return;
+    }
+
+    if (fs[newName]) {
+      window.alert("Имя занято");
+      return;
+    }
+
+    const next = { ...fs };
+    next[newName] = next[oldName];
+    delete next[oldName];
+
+    setFs(next);
+    setOpenFiles((prev) =>
+      prev.map((file) => (file === oldName ? newName : file))
+    );
+
+    if (active === oldName) {
+      setActive(newName);
+    }
+  };
+
+  const run = () => setIframeKey((key) => key + 1);
+
+  const reset = () => {
+    if (!window.confirm("Сбросить проект к шаблону?")) {
+      return;
+    }
+
+    setFs(initialFS);
+    setOpenFiles(["index.html"]);
+    setActive("index.html");
+    setIframeKey((key) => key + 1);
+  };
+
+  return (
+    <div className="devspace">
+      <div className="topbar">
+        <button
+          type="button"
+          onClick={() => setSidebarOpen((previous) => !previous)}
+          className="icon-button"
+          aria-label="Toggle sidebar"
+        >
+          ☰
+        </button>
+        <h1 className="topbar__title">KimeCube DevSpace</h1>
+        <div className="topbar__actions">
+          <button type="button" onClick={run} className="primary-button">
+            ▶️ Run
+          </button>
+          <button type="button" onClick={reset} className="secondary-button">
+            Reset
+          </button>
+        </div>
+      </div>
+
+      <div className="content">
+        <div className="panel panel--editor">
+          <div className="panel__header">
+            <span className="panel__title">Файлы проекта</span>
+            <div className="panel__header-actions">
+              <button
+                type="button"
+                onClick={addFile}
+                className="icon-button"
+              >
+                ＋
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="file-grid"
+            style={{ maxHeight: sidebarOpen ? 256 : 0 }}
+          >
+            <div className="file-grid__inner">
+              {Object.keys(fs).map((name) => {
+                const isActive = active === name;
+
+                return (
+                  <div
+                    key={name}
+                    className={`file-card${isActive ? " file-card--active" : ""}`}
+                    onClick={() => {
+                      setActive(name);
+                      setOpenFiles((prev) =>
+                        Array.from(new Set([name, ...prev]))
+                      );
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setActive(name);
+                        setOpenFiles((prev) =>
+                          Array.from(new Set([name, ...prev]))
+                        );
+                      }
+                    }}
+                  >
+                    <span className="file-card__name" title={name}>
+                      {name}
+                    </span>
+                    <div className="file-card__actions">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          renameFile(name);
+                        }}
+                        className="pill-button"
+                      >
+                        rename
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteFile(name);
+                        }}
+                        className="pill-button"
+                      >
+                        del
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="tabs" role="tablist">
+            {openFiles.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => setActive(name)}
+                className={`tab${active === name ? " tab--active" : ""}`}
+                role="tab"
+                aria-selected={active === name}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+
+          <div className="editor-wrapper">
+            <Editor
+              value={fs[active] ?? ""}
+              onChange={(value) =>
+                setFs((previous) => ({ ...previous, [active]: value }))
+              }
+            />
+          </div>
+
+          <div className="muted-text">
+            Автосохранение включено · Локально (offline‑first)
+          </div>
+        </div>
+
+        <div className="panel panel--preview">
+          <div className="panel__header">
+            <span className="panel__title">Предпросмотр</span>
+            <div className="panel__header-actions">
+              <button type="button" onClick={run} className="primary-button">
+                Перезапустить
+              </button>
+            </div>
+          </div>
+
+          <div className="preview-frame">
+            <iframe
+              key={iframeKey}
+              title="preview"
+              sandbox="allow-scripts allow-same-origin"
+              className="preview-frame__iframe"
+              srcDoc={srcDoc}
+            />
+          </div>
+
+          <div className="muted-text">
+            Поддержка multi‑file превью через inline packer. Для продвинутого
+            режима можно подключить WebContainer/Service Worker bundling.
+          </div>
+        </div>
+      </div>
+
+      <div className="footer">
+        <span>План:</span>
+        <span className="tag">Git Sync</span>
+        <span className="tag">PWA install</span>
+        <span className="tag">Assets/Projects</span>
+        <span className="tag">WebContainer</span>
+      </div>
     </div>
   );
 }
 
 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<MobileDevSpace />);
